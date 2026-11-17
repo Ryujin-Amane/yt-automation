@@ -1,0 +1,458 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="YT Automation Command Center">
+    <title>YT Automation — Command Center</title>
+    <!-- New Typography: Space Grotesk (Headings) & DM Sans (Body) -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    
+    <div class="app-container">
+        
+        <!-- ════════════ Sidebar Navigation ════════════ -->
+        <aside class="sidebar">
+            <div class="sidebar__brand">
+                <div class="sidebar__logo-icon">
+                    <svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <!-- Intense neon glow behind the logo -->
+                        <rect x="5" y="9" width="22" height="14" rx="6" fill="#ff0000" filter="blur(8px)" opacity="0.6" />
+                        
+                        <!-- Dark glossy metallic outer shell -->
+                        <path d="M28.4 10.6C28.1 9.3 27.1 8.3 25.8 8C23.6 7.4 16 7.4 16 7.4S8.4 7.4 6.2 8C4.9 8.3 3.9 9.3 3.6 10.6C3 12.8 3 16 3 16S3 19.2 3.6 21.4C3.9 22.7 4.9 23.7 6.2 24C8.4 24.6 16 24.6 16 24.6S23.6 24.6 25.8 24C27.1 23.7 28.1 22.7 28.4 21.4C29 19.2 29 16 29 16S29 12.8 28.4 10.6Z" fill="url(#yt-body)" stroke="url(#yt-glass)" stroke-width="0.5"/>
+                        
+                        <!-- Inner play button (bright white/orange glow) -->
+                        <path d="M13.5 20V12L20.5 16L13.5 20Z" fill="url(#play-grad)" filter="drop-shadow(0px 0px 3px rgba(255, 200, 100, 0.8))"/>
+                        
+                        <defs>
+                            <linearGradient id="yt-body" x1="16" y1="7.4" x2="16" y2="24.6" gradientUnits="userSpaceOnUse">
+                                <stop stop-color="#3a0a0a"/>
+                                <stop offset="1" stop-color="#0f0000"/>
+                            </linearGradient>
+                            
+                            <linearGradient id="yt-glass" x1="3" y1="7.4" x2="29" y2="24.6" gradientUnits="userSpaceOnUse">
+                                <stop stop-color="#ff6b6b" stop-opacity="0.9"/>
+                                <stop offset="0.5" stop-color="#ff0000" stop-opacity="0.1"/>
+                                <stop offset="1" stop-color="#ff2a2a" stop-opacity="0.5"/>
+                            </linearGradient>
+                            
+                            <linearGradient id="play-grad" x1="13.5" y1="12" x2="20.5" y2="20" gradientUnits="userSpaceOnUse">
+                                <stop stop-color="#ffffff"/>
+                                <stop offset="1" stop-color="#ffdddd"/>
+                            </linearGradient>
+                        </defs>
+                    </svg>
+                </div>
+                <div>
+                    <h1 class="sidebar__title font-heading">YT Auto</h1>
+                    <p class="sidebar__subtitle">Command Center</p>
+                </div>
+            </div>
+
+            <nav class="nav-menu" id="navTabs">
+                <div class="nav-item nav-item--active tabs__btn tabs__btn--active" data-tab="dashboard">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+                    <span>Dashboard</span>
+                </div>
+                <div class="nav-item tabs__btn" data-tab="queue">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
+                    <span>Queue</span>
+                    <span class="nav-badge" id="queueBadge">0</span>
+                </div>
+                <div class="nav-item tabs__btn" data-tab="scheduler">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/><path d="M8 14h.01"/><path d="M12 14h.01"/><path d="M16 14h.01"/><path d="M8 18h.01"/><path d="M12 18h.01"/></svg>
+                    <span>Scheduler</span>
+                </div>
+                <div class="nav-item tabs__btn" data-tab="settings">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+                    <span>Settings</span>
+                </div>
+            </nav>
+
+            <div class="sidebar__actions">
+                <button class="btn btn--secondary" id="btnFetch" title="Fetch new TikToks">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 11-3.36-7.01"/><polyline points="21 3 21 9 15 9"/></svg>
+                    <span>Fetch Now</span>
+                </button>
+                <button class="btn btn--primary" id="btnUploadAll" title="Upload all pending">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                    <span>Upload All</span>
+                </button>
+            </div>
+        </aside>
+
+        <!-- ════════════ Main Content ════════════ -->
+        <main class="main-content">
+            
+            <header class="header-top">
+                <h2 class="header-top__title font-heading" id="currentTabTitle">Dashboard</h2>
+                <div class="header-top__meta" id="serverTime">
+                    <div class="skeleton skeleton-text skeleton-text--short" style="margin:0; width:150px; height:16px;"></div>
+                </div>
+            </header>
+
+            <div class="content-body">
+                
+                <!-- ──── Dashboard Tab ──── -->
+                <section class="tab-panel tab-panel--active" id="panel-dashboard">
+                    <!-- Premium Bento Box Grid -->
+                    <div class="bento-grid animate-stagger" id="statsGrid">
+                        <!-- Channels (Large) -->
+                        <div class="bento-card bento-card--large bento-card--indigo">
+                            <div class="bento-card__icon">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="7" width="20" height="15" rx="2" ry="2"/><polyline points="17 2 12 7 7 2"/></svg>
+                            </div>
+                            <div class="bento-card__content">
+                                <h4>Active Channels</h4>
+                                <div class="bento-value stat-counter" id="statChannels">0</div>
+                            </div>
+                        </div>
+
+                        <!-- In Queue -->
+                        <div class="bento-card bento-card--cyan">
+                            <div class="bento-card__icon">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                            </div>
+                            <div class="bento-card__content">
+                                <h4>In Queue</h4>
+                                <div class="bento-value stat-counter" id="statQueue">0</div>
+                            </div>
+                        </div>
+
+                        <!-- Pending -->
+                        <div class="bento-card bento-card--amber">
+                            <div class="bento-card__icon">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                            </div>
+                            <div class="bento-card__content">
+                                <h4>Pending</h4>
+                                <div class="bento-value stat-counter" id="statPending">0</div>
+                            </div>
+                        </div>
+
+                        <!-- Auto Upload (Wide) -->
+                        <div class="bento-card bento-card--wide bento-card--emerald">
+                            <div class="bento-card__icon">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+                            </div>
+                            <div class="bento-card__content">
+                                <h4>Auto Upload</h4>
+                                <div class="bento-value" id="statAutoUpload">—</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Channel Upload Status -->
+                    <div class="card animate-stagger" style="animation-delay: 100ms; margin-bottom: 24px;">
+                        <div class="card__header">
+                            <h3 class="card__title font-heading">Channel Upload Status</h3>
+                            <span class="text-muted" style="font-size: 0.875rem;" id="channelDate"></span>
+                        </div>
+                        <div class="card__body">
+                            <div class="channel-list" id="channelDetails">
+                                <!-- Skeletons until data loads -->
+                                <div class="channel-row">
+                                    <div class="skeleton skeleton-text" style="width: 80px; margin: 0;"></div>
+                                    <div class="skeleton" style="flex:1; height: 8px; border-radius: 4px;"></div>
+                                    <div class="skeleton skeleton-text" style="width: 60px; margin: 0;"></div>
+                                </div>
+                                <div class="channel-row">
+                                    <div class="skeleton skeleton-text" style="width: 80px; margin: 0;"></div>
+                                    <div class="skeleton" style="flex:1; height: 8px; border-radius: 4px;"></div>
+                                    <div class="skeleton skeleton-text" style="width: 60px; margin: 0;"></div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Monitored TikTok Accounts -->
+                    <div class="card animate-stagger" style="animation-delay: 200ms;">
+                        <div class="card__header">
+                            <h3 class="card__title font-heading">Monitored TikTok Accounts</h3>
+                        </div>
+                        <div class="card__body">
+                            <div class="tags-container" id="monitoredAccounts">
+                                <div class="skeleton skeleton-text" style="width: 100px; height: 28px; border-radius: 14px; margin:0; display: inline-block;"></div>
+                                <div class="skeleton skeleton-text" style="width: 120px; height: 28px; border-radius: 14px; margin:0; display: inline-block;"></div>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- ──── Queue Tab ──── -->
+                <section class="tab-panel" id="panel-queue">
+                    <div class="queue-header animate-stagger">
+                        <div>
+                            <h3 class="font-heading" style="font-size: 1.25rem;">Video Queue</h3>
+                            <span class="text-muted" style="font-size: 0.875rem;" id="queueCount">0 videos</span>
+                        </div>
+                        <div style="display: flex; gap: 8px;">
+                            <button class="btn btn--secondary" id="btnClearCompleted">Clear Completed</button>
+                            <button class="btn btn--danger" id="btnClearAll">Clear All</button>
+                        </div>
+                    </div>
+
+                    <div class="queue-list animate-stagger" style="animation-delay: 100ms;" id="queueList">
+                        <!-- Items rendered by JS -->
+                        <div class="skeleton skeleton-card"></div>
+                        <div class="skeleton skeleton-card"></div>
+                    </div>
+                </section>
+
+                <!-- ──── Scheduler Tab ──── -->
+                <section class="tab-panel" id="panel-scheduler">
+                    <div class="animate-stagger">
+                        <!-- Batch Run Controls -->
+                        <div class="card" style="margin-bottom: var(--sp-lg);">
+                            <div class="card__header">
+                                <h3 class="card__title font-heading">🚀 Batch Schedule & Upload</h3>
+                                <div style="display:flex;gap:8px;">
+                                    <button class="btn btn--secondary" id="btnPreviewSlots">
+                                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                                        Preview Slots
+                                    </button>
+                                    <button class="btn btn--primary" id="btnRunBatch">
+                                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                                        Run Batch Now
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="card__body">
+                                <div class="settings-grid">
+                                    <div class="field">
+                                        <label class="field__label" for="batch_per_day">Videos / Channel / Day</label>
+                                        <select class="field__select" id="batch_per_day">
+                                            <option value="1">1 per day</option>
+                                            <option value="2" selected>2 per day</option>
+                                            <option value="3">3 per day</option>
+                                        </select>
+                                        <span class="field__hint">Slots spread ~3h apart around peak</span>
+                                    </div>
+                                    <div class="field">
+                                        <label class="field__label" for="batch_max_per_channel">Total Days to Fill</label>
+                                        <input class="field__input" type="number" id="batch_max_per_channel" min="1" max="14" value="7">
+                                        <span class="field__hint">How many days ahead to schedule</span>
+                                    </div>
+                                    <div class="field">
+                                        <label class="field__label">Dry Run</label>
+                                        <label class="toggle" for="batch_dry_run" style="margin-top:6px;">
+                                            <input type="checkbox" id="batch_dry_run">
+                                            <span class="toggle__slider"></span>
+                                        </label>
+                                        <span class="field__hint">Preview only, no actual uploads</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Slot Preview Timeline -->
+                        <div class="card" style="margin-bottom: var(--sp-lg);" id="slotPreviewCard" hidden>
+                            <div class="card__header">
+                                <h3 class="card__title font-heading">📅 Upcoming Publish Slots</h3>
+                                <span class="text-muted" style="font-size: 0.875rem;" id="slotPreviewMeta"></span>
+                            </div>
+                            <div class="card__body" id="slotPreviewBody">
+                                <div class="skeleton skeleton-card"></div>
+                            </div>
+                        </div>
+
+                        <!-- Per-Channel Schedule Config -->
+                        <div class="card" style="margin-bottom: var(--sp-lg);">
+                            <div class="card__header">
+                                <h3 class="card__title font-heading">📺 Channel Schedule Configuration</h3>
+                                <button class="btn btn--primary" id="btnSaveSchedule">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+                                    Save Schedule
+                                </button>
+                            </div>
+                            <div class="card__body" id="scheduleChannelConfig">
+                                <div class="skeleton skeleton-card"></div>
+                            </div>
+                        </div>
+
+                        <!-- Peak Windows Editor -->
+                        <div class="card">
+                            <div class="card__header">
+                                <h3 class="card__title font-heading">⏰ Peak Viewer Windows</h3>
+                                <span class="text-muted" style="font-size: 0.875rem;">Set optimal publish times per day of week</span>
+                            </div>
+                            <div class="card__body" id="peakWindowsEditor">
+                                <div class="skeleton skeleton-card"></div>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- ──── Settings Tab ──── -->
+                <section class="tab-panel" id="panel-settings">
+                    <form id="settingsForm" autocomplete="off" class="animate-stagger">
+                        
+                        <!-- Dynamic Channels -->
+                        <div id="dynamicChannelSettings"></div>
+
+                        <!-- Scheduler & Limits -->
+                        <div class="settings-section">
+                            <h3 class="settings-section__title font-heading">Scheduler & Limits</h3>
+                            <div class="settings-grid">
+                                <div class="field">
+                                    <label class="field__label" for="setting_check_interval_minutes">Check Interval (minutes)</label>
+                                    <input class="field__input" type="number" id="setting_check_interval_minutes" min="1" max="1440">
+                                    <span class="field__hint">Scan for new TikToks</span>
+                                </div>
+                                <div class="field">
+                                    <label class="field__label" for="setting_max_uploads_per_channel">Max Uploads / Channel / Day</label>
+                                    <input class="field__input" type="number" id="setting_max_uploads_per_channel" min="1" max="100">
+                                    <span class="field__hint">Daily upload cap</span>
+                                </div>
+                                <div class="field">
+                                    <label class="field__label" for="setting_uploads_per_channel_per_run">Uploads / Channel / Run</label>
+                                    <input class="field__input" type="number" id="setting_uploads_per_channel_per_run" min="1" max="50">
+                                    <span class="field__hint">Per scheduler tick</span>
+                                </div>
+                                <div class="field">
+                                    <label class="field__label" for="setting_video_max_age_hours">Video Max Age (hours)</label>
+                                    <input class="field__input" type="number" id="setting_video_max_age_hours" min="1" max="720">
+                                    <span class="field__hint">Skip older TikToks</span>
+                                </div>
+                                <div class="field">
+                                    <label class="field__label" for="setting_unlimited_channel">Unlimited Channel #</label>
+                                    <input class="field__input" type="number" id="setting_unlimited_channel" min="1" max="99">
+                                    <span class="field__hint">Extended API quota channel</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Video Processing -->
+                        <div class="settings-section">
+                            <h3 class="settings-section__title font-heading">Video Processing</h3>
+                            <div class="settings-grid">
+                                <div class="field field--wide">
+                                    <label class="field__label" for="setting_video_preset">Video Preset (Anti-Detection)</label>
+                                    <select class="field__select" id="setting_video_preset">
+                                        <option value="none">None (Speed + Zoom + Color only)</option>
+                                        <option value="blur_border">🔴 Blur Border (Blurred bg + 90% video overlay)</option>
+                                        <option value="mirror_border">🔴 Mirror Border (Flipped bg + 90% video overlay)</option>
+                                        <option value="picture_in_picture">🔴 Picture-in-Picture (55% video on blurred bg)</option>
+                                        <option value="grain_vhs">🟡 VHS Film Grain (Noise + scanlines + color bleed)</option>
+                                        <option value="cinema_bars">🟡 Cinema Bars (Letterbox + vignette + grain)</option>
+                                    </select>
+                                    <span class="field__hint">🔴 = Ultra fingerprint change, 🟡 = High change. Stacks with color profile below.</span>
+                                </div>
+                                <div class="field field--wide">
+                                    <label class="field__label" for="setting_color_profile">Color & LUT Profile</label>
+                                    <select class="field__select" id="setting_color_profile">
+                                        <option value="none">Default (Uses Sat/Cont below)</option>
+                                        <option value="anime">Vibrant Anime (High Sat/Contrast, Magenta Tint)</option>
+                                        <option value="cinematic_dark">Cinematic Dark (Low Sat, Teal/Orange push)</option>
+                                        <option value="high_contrast">High Contrast (Pop & Sharp)</option>
+                                    </select>
+                                    <span class="field__hint">FFmpeg filters to bypass duplicate detection</span>
+                                </div>
+                                <div class="field">
+                                    <label class="field__label" for="setting_speed_factor">Speed Factor</label>
+                                    <input class="field__input" type="number" id="setting_speed_factor" min="0.5" max="2.0" step="0.01">
+                                </div>
+                                <div class="field">
+                                    <label class="field__label" for="setting_zoom_percent">Zoom Percent</label>
+                                    <input class="field__input" type="number" id="setting_zoom_percent" min="1.0" max="1.5" step="0.01">
+                                </div>
+                                <div class="field">
+                                    <label class="field__label" for="setting_saturation_boost">Saturation Boost</label>
+                                    <input class="field__input" type="number" id="setting_saturation_boost" min="0.5" max="2.0" step="0.05">
+                                </div>
+                                <div class="field">
+                                    <label class="field__label" for="setting_contrast_boost">Contrast Boost</label>
+                                    <input class="field__input" type="number" id="setting_contrast_boost" min="0.5" max="2.0" step="0.05">
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- AI & Content -->
+                        <div class="settings-section">
+                            <h3 class="settings-section__title font-heading">AI & SEO</h3>
+                            <div class="settings-grid">
+                                <div class="field">
+                                    <label class="field__label" for="setting_ai_primary_provider">AI Provider</label>
+                                    <select class="field__select" id="setting_ai_primary_provider">
+                                        <option value="gemini">Gemini</option>
+                                        <option value="groq">Groq</option>
+                                    </select>
+                                </div>
+                                <div class="field field--wide">
+                                    <label class="field__label" for="setting_custom_hashtags">Custom Hashtags</label>
+                                    <input class="field__input" type="text" id="setting_custom_hashtags" placeholder="#shorts #viral #trending">
+                                </div>
+                                <div class="field field--wide">
+                                    <label class="field__label" for="setting_tiktok_usernames">TikTok Usernames to Monitor</label>
+                                    <input class="field__input" type="text" id="setting_tiktok_usernames" placeholder="account1, account2, account3">
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Automation Toggle -->
+                        <div class="settings-section">
+                            <div class="toggle-wrapper">
+                                <div class="toggle-info">
+                                    <div class="toggle-info__title">Auto Upload</div>
+                                    <div class="toggle-info__desc">Automatically upload queued videos on each scheduler tick</div>
+                                </div>
+                                <label class="toggle" for="setting_auto_upload_enabled">
+                                    <input type="checkbox" id="setting_auto_upload_enabled">
+                                    <span class="toggle__slider"></span>
+                                </label>
+                            </div>
+                        </div>
+
+                        <!-- Actions -->
+                        <div class="settings-actions">
+                            <button type="submit" class="btn btn--primary" id="btnSaveSettings">Save Settings</button>
+                            <button type="button" class="btn btn--secondary" id="btnResetSettings">Reset Defaults</button>
+                        </div>
+                    </form>
+                </section>
+
+            </div>
+        </main>
+    </div>
+
+    <!-- ════════════ Toast Container ════════════ -->
+    <div class="toast-container" id="toastContainer"></div>
+
+    <!-- ════════════ Upload Modal ════════════ -->
+    <div class="modal-overlay" id="uploadModal">
+        <div class="modal">
+            <div class="modal__header">
+                <h3 class="modal__title font-heading">Force Upload</h3>
+                <button class="modal__close" id="modalClose">&times;</button>
+            </div>
+            <div class="modal__body">
+                <p style="font-weight: 500; font-size: 0.875rem;" id="modalVideoTitle">Loading...</p>
+                <p style="color: var(--accent-primary); font-size: 0.8125rem; margin-bottom: 16px;" id="modalVideoAuthor"></p>
+                
+                <div class="field">
+                    <label class="field__label" style="margin-bottom: 8px;">Target Channels</label>
+                    <div id="modalChannelContainer" class="checkbox-container">
+                        <!-- Rendered by JS -->
+                        <div class="skeleton skeleton-text" style="margin-bottom: 4px;"></div>
+                        <div class="skeleton skeleton-text"></div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal__footer">
+                <button class="btn btn--secondary" id="modalCancel">Cancel</button>
+                <button class="btn btn--primary" id="modalConfirm">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                    Upload Now
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/app.js?v=2"></script>
+</body>
+</html>

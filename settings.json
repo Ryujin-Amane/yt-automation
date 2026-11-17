@@ -1,0 +1,24 @@
+{
+  "channel_settings": {
+    "1": {
+      "max_uploads_per_day": 10,
+      "uploads_per_run": 1,
+      "upload_interval_minutes": 60
+    }
+  },
+  "check_interval_minutes": 60,
+  "max_uploads_per_channel": 30,
+  "uploads_per_channel_per_run": 1,
+  "video_max_age_hours": 168,
+  "unlimited_channel": 1,
+  "speed_factor": 1.05,
+  "zoom_percent": 1.02,
+  "saturation_boost": 1.1,
+  "contrast_boost": 1.05,
+  "ai_primary_provider": "gemini",
+  "custom_hashtags": "#shorts #viral #trending #fyp",
+  "tiktok_usernames": [],
+  "auto_upload_enabled": true,
+  "color_profile": "none",
+  "video_preset": "none"
+}

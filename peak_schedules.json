@@ -1,0 +1,86 @@
+{
+  "channels": {
+    "1": {
+      "channel_stagger_minutes": 0,
+      "max_videos_per_batch": 7,
+      "name": "QUAN\u2591XI\ud83c\udf19",
+      "peak_viewer_windows": [
+        {
+          "activity_level": "VERY_HIGH",
+          "day": "Saturday",
+          "peak_end_pkt": "24:00",
+          "peak_start_pkt": "19:00",
+          "recommended_publish_pkt": "17:30"
+        },
+        {
+          "activity_level": "VERY_HIGH",
+          "day": "Sunday",
+          "peak_end_pkt": "23:00",
+          "peak_start_pkt": "19:00",
+          "recommended_publish_pkt": "17:30"
+        },
+        {
+          "activity_level": "HIGH",
+          "day": "Friday",
+          "peak_end_pkt": "24:00",
+          "peak_start_pkt": "18:00",
+          "recommended_publish_pkt": "16:30"
+        },
+        {
+          "activity_level": "HIGH",
+          "day": "Monday",
+          "peak_end_pkt": "24:00",
+          "peak_start_pkt": "18:00",
+          "recommended_publish_pkt": "16:30"
+        },
+        {
+          "activity_level": "HIGH",
+          "day": "Tuesday",
+          "peak_end_pkt": "21:00",
+          "peak_start_pkt": "19:00",
+          "recommended_publish_pkt": "17:30"
+        },
+        {
+          "activity_level": "HIGH",
+          "day": "Wednesday",
+          "peak_end_pkt": "21:00",
+          "peak_start_pkt": "19:00",
+          "recommended_publish_pkt": "17:30"
+        },
+        {
+          "activity_level": "HIGH",
+          "day": "Thursday",
+          "peak_end_pkt": "21:00",
+          "peak_start_pkt": "20:00",
+          "recommended_publish_pkt": "18:30"
+        }
+      ],
+      "timezone": "Asia/Karachi",
+      "utc_offset": "+05:00"
+    },
+    "2": {
+      "channel_stagger_minutes": 15,
+      "inherit_from": "1",
+      "max_videos_per_batch": 7,
+      "name": "Channel 2",
+      "timezone": "Asia/Karachi",
+      "utc_offset": "+05:00"
+    },
+    "3": {
+      "channel_stagger_minutes": 30,
+      "inherit_from": "1",
+      "max_videos_per_batch": 7,
+      "name": "Channel 3",
+      "timezone": "Asia/Karachi",
+      "utc_offset": "+05:00"
+    },
+    "4": {
+      "channel_stagger_minutes": 45,
+      "inherit_from": "1",
+      "max_videos_per_batch": 7,
+      "name": "Channel 4",
+      "timezone": "Asia/Karachi",
+      "utc_offset": "+05:00"
+    }
+  }
+}

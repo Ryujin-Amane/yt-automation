@@ -1,0 +1,46 @@
+name: Render 24/7 Keep-Alive Pinger
+
+on:
+  schedule:
+    # Runs every 5 minutes (well within Render's 15-minute idle spin-down window)
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+jobs:
+  ping-render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Ping Render Web Service (/keep-alive & /health)
+        env:
+          RENDER_APP_URL: ${{ secrets.RENDER_APP_URL || vars.RENDER_APP_URL }}
+        run: |
+          if [ -z "$RENDER_APP_URL" ]; then
+            echo "⚠️ RENDER_APP_URL secret or repo variable is not set yet. Add it in GitHub Repo Settings -> Secrets and variables -> Actions."
+            exit 0
+          fi
+
+          BASE_URL="${RENDER_APP_URL%/}"
+          echo "📡 Pinging $BASE_URL/keep-alive ..."
+
+          # Up to 3 attempts (handles cold-start wakeups up to 60s per attempt)
+          for attempt in 1 2 3; do
+            HTTP_CODE=$(curl -sS -L -o /tmp/ping_resp.json -w "%{http_code}" \
+              --max-time 60 \
+              -H "User-Agent: GitHubActions-KeepAlive/1.0" \
+              -H "Cache-Control: no-cache" \
+              "$BASE_URL/keep-alive" || echo "000")
+
+            if [ "$HTTP_CODE" = "200" ]; then
+              echo "✅ Attempt $attempt: Render service is ALIVE (HTTP $HTTP_CODE)"
+              cat /tmp/ping_resp.json
+              echo ""
+              exit 0
+            fi
+
+            echo "⏳ Attempt $attempt returned HTTP $HTTP_CODE — waiting 10s before retry..."
+            sleep 10
+          done
+
+          echo "❌ Render service did not respond with 200 after 3 attempts."
+          exit 1

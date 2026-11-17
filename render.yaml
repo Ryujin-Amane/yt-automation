@@ -1,0 +1,46 @@
+services:
+  - type: web
+    name: yt-automation
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: PORT
+        value: "10000"
+      - key: ENABLE_WARP
+        value: "true"
+      - key: PROXY_MODE
+        value: "auto"
+      - key: SELF_PING_INTERVAL_SECONDS
+        value: "240"
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: YOUTUBE_API_KEY
+        sync: false
+      - key: TIKTOK_USERNAMES
+        sync: false
+      - key: PROXY_URLS
+        sync: false
+      - key: YOUTUBE_TOKEN_1
+        sync: false
+      - key: YOUTUBE_CLIENT_SECRET_1
+        sync: false
+      - key: YOUTUBE_TOKEN_2
+        sync: false
+      - key: YOUTUBE_CLIENT_SECRET_2
+        sync: false
+      - key: YOUTUBE_TOKEN_3
+        sync: false
+      - key: YOUTUBE_CLIENT_SECRET_3
+        sync: false
+      - key: YOUTUBE_TOKEN_4
+        sync: false
+      - key: YOUTUBE_CLIENT_SECRET_4
+        sync: false
