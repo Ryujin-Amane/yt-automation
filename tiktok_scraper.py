@@ -1,24 +1,28 @@
 """
-TikTok Scraper — Multi-Layered Anti-Block Fetcher & Downloader.
+TikTok Scraper — multi-provider fetcher & downloader (Zero-FFmpeg).
 
-Combines 4 independent extraction/proxy layers so datacenter IPs (like Render)
-never get blocked by TikTok:
-  1. Custom Rotating Proxies (HTTP / SOCKS5 via proxy_manager)
-  2. Cloudflare WARP Userspace VPN (wireproxy socks5://127.0.0.1:1080)
-  3. yt-dlp with Chrome TLS Impersonation (curl_cffi) + Patched WAF JS Challenge Solver
-  4. TikWM API Fallback (fetches user feeds & HD watermark-free MP4s via TikWM infrastructure)
+Why multiple providers?  TikTok aggressively blocks datacenter IPs (Render,
+AWS, ...). No single free method is reliable from a cloud server, so we try,
+in order (configurable with FETCH_PROVIDERS):
 
-Also optimized for Render Free Tier (0% FFmpeg usage):
-  - Downloads single pre-muxed MP4 streams (video+audio combined) so FFmpeg
-    is never required to merge or re-encode streams.
+  1. scrapecreators — ScrapeCreators API   (needs SCRAPECREATORS_API_KEY)  ← most reliable
+  2. apify          — Apify TikTok Scraper (needs APIFY_TOKEN)
+  3. ytdlp          — yt-dlp through the proxy chain (custom proxies → WARP → direct)
+  4. tikwm          — TikWM public API (skipped automatically if it serves a
+                      Cloudflare challenge; we never try to get around that)
+
+Each provider has health tracking + cooldown so a broken one doesn't slow
+every run. Downloads always fetch a single pre-muxed MP4, so FFmpeg is never needed.
 """
 
 import os
-import re
 import time
 import logging
+import threading
+
 import requests
 import yt_dlp
+
 import config
 import proxy_manager
 
@@ -30,35 +34,26 @@ try:
 except Exception:
     IMPERSONATE_TARGET = None
 
-
-# ══════════════════════════════════════════════════════════════
-#  Monkey-patch: Fix yt-dlp TikTokUserIE to solve WAF challenge
-#  on user profile pages (yt-dlp only does this for video pages)
-# ══════════════════════════════════════════════════════════════
+# ── Monkey-patch yt-dlp TikTokUserIE to solve WAF JS challenges on profile pages ──
 try:
+    import re as _re
     from yt_dlp.extractor.tiktok import TikTokUserIE, traverse_obj, ExtractorError
 
     _orig_tiktok_user_real_extract = TikTokUserIE._real_extract
 
     def _patched_tiktok_user_real_extract(self, url):
-        """Patched _real_extract that solves WAF JS challenges on user pages."""
         user_name = self._match_id(url)
-
-        # If it's a raw sec_uid, skip patch and use original
-        if re.fullmatch(r'MS4wLjABAAAA[\w-]{64}', user_name):
+        if _re.fullmatch(r'MS4wLjABAAAA[\w-]{64}', user_name):
             return _orig_tiktok_user_real_extract(self, url)
 
-        # Step 1: Download user webpage
         webpage = self._download_webpage(
             self._UPLOADER_URL_FORMAT % user_name, user_name,
             'Downloading user webpage', 'Unable to download user webpage',
             impersonate=True, fatal=False,
             headers=self._generate_blockbuster_headers()) or ''
 
-        # Step 2: Try to extract universal data
         universal_data = self._get_universal_data(webpage, user_name)
 
-        # Step 3: If no data, solve the WAF JS challenge (the key fix!)
         if not universal_data and webpage:
             try:
                 cookie_names = self._solve_challenge_and_set_cookies(webpage)
@@ -69,35 +64,23 @@ try:
                     headers=self._generate_blockbuster_headers()) or ''
                 for cookie_name in filter(None, cookie_names or []):
                     try:
-                        self.cookiejar.clear(
-                            domain='.tiktok.com', path='/', name=cookie_name)
+                        self.cookiejar.clear(domain='.tiktok.com', path='/', name=cookie_name)
                     except KeyError:
                         pass
                 universal_data = self._get_universal_data(webpage, user_name)
             except Exception as e:
                 log.debug(f"WAF challenge solve failed for @{user_name}: {e}")
 
-        # Step 4: Extract sec_uid from the data
-        detail = traverse_obj(
-            universal_data, ('webapp.user-detail', {dict})) or {}
-
-        video_count = traverse_obj(
-            detail, ('userInfo', ('stats', 'statsV2'),
-                     'videoCount', {int}, any))
+        detail = traverse_obj(universal_data, ('webapp.user-detail', {dict})) or {}
+        video_count = traverse_obj(detail, ('userInfo', ('stats', 'statsV2'), 'videoCount', {int}, any))
         if not video_count and detail.get('statusCode') == 10222:
-            self.raise_login_required(
-                "This user's account is private. "
-                "Log into an account that has access")
+            self.raise_login_required("This user's account is private.")
         elif video_count == 0:
-            raise ExtractorError(
-                'This account does not have any videos posted', expected=True)
+            raise ExtractorError('This account does not have any videos posted', expected=True)
 
-        sec_uid = traverse_obj(
-            detail, ('userInfo', 'user', 'secUid', {str}))
-
+        sec_uid = traverse_obj(detail, ('userInfo', 'user', 'secUid', {str}))
         if sec_uid:
-            fail_early = not traverse_obj(
-                detail, ('userInfo', 'itemList', ...))
+            fail_early = not traverse_obj(detail, ('userInfo', 'itemList', ...))
         else:
             sec_uid = self._extract_sec_uid_from_embed(user_name)
             fail_early = False
@@ -105,499 +88,565 @@ try:
         if not sec_uid:
             return _orig_tiktok_user_real_extract(self, url)
 
-        return self.playlist_result(
-            self._entries(sec_uid, user_name, fail_early),
-            sec_uid, user_name)
+        return self.playlist_result(self._entries(sec_uid, user_name, fail_early), sec_uid, user_name)
 
     TikTokUserIE._real_extract = _patched_tiktok_user_real_extract
     log.info("🔧 Patched TikTokUserIE with WAF challenge solver")
+except Exception as _patch_err:
+    log.warning(f"⚠️ Could not patch TikTokUserIE: {_patch_err}")
 
-except Exception as patch_err:
-    log.warning(f"⚠️ Could not patch TikTokUserIE: {patch_err}")
+BROWSER_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
+
+SCRAPECREATORS_BASE = "https://api.scrapecreators.com"
+APIFY_ACTOR = os.getenv("APIFY_TIKTOK_ACTOR", "clockworks~tiktok-scraper")
+TIKWM_USER_API = "https://www.tikwm.com/api/user/posts"
+TIKWM_VIDEO_API = "https://www.tikwm.com/api/"
+
+DEFAULT_PROVIDER_ORDER = ["scrapecreators", "apify", "ytdlp", "tikwm"]
+
+# ── Provider health / cooldown ────────────────────────────────
+_PROVIDER_FAIL_THRESHOLD = 3
+_PROVIDER_COOLDOWN = 20 * 60
+_health_lock = threading.Lock()
+_provider_health: dict[str, dict] = {}
 
 
-def _parse_entries(entries: list, username: str) -> list[dict]:
-    """Parse yt-dlp entries into our standardized video dict format."""
-    results = []
-    for entry in entries:
-        if entry is None:
-            continue
+class ProviderBlocked(Exception):
+    """Provider refused us in a way retrying won't fix soon (challenge page, bad key, no credits)."""
 
-        vid_id = str(entry.get("id", ""))
-        if not vid_id:
-            continue
+    def __init__(self, msg: str, cooldown: int = 6 * 3600):
+        super().__init__(msg)
+        self.cooldown = cooldown
 
-        caption = entry.get("description", entry.get("title", ""))
-        duration = entry.get("duration", 0)
-        width = entry.get("width", 0) or 0
-        height = entry.get("height", 0) or 0
-        cover = entry.get("thumbnail", "")
-        video_timestamp = entry.get("timestamp", 0)
-        play_url = entry.get("url", "") or f"https://www.tiktok.com/@{username}/video/{vid_id}"
 
-        results.append({
-            "id": vid_id,
-            "title": caption or "",
-            "play": play_url,
-            "duration": duration or 0,
-            "width": width,
-            "height": height,
-            "cover": cover or "",
-            "author": username,
-            "timestamp": video_timestamp or 0,
+def _record(provider: str, ok: bool, error: str = "", cooldown: int | None = None):
+    with _health_lock:
+        h = _provider_health.setdefault(provider, {
+            "successes": 0, "failures": 0, "consecutive_failures": 0,
+            "skip_until": 0, "last_error": "", "last_success": None,
         })
+        if ok:
+            h["successes"] += 1
+            h["consecutive_failures"] = 0
+            h["skip_until"] = 0
+            h["last_error"] = ""
+            h["last_success"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            return
+        h["failures"] += 1
+        h["consecutive_failures"] += 1
+        h["last_error"] = str(error)[:240]
+        if cooldown:
+            h["skip_until"] = time.time() + cooldown
+            log.warning(f"⏸️ Provider '{provider}' blocked/unavailable — skipping for {cooldown // 60} min: {error}")
+        elif h["consecutive_failures"] >= _PROVIDER_FAIL_THRESHOLD:
+            h["skip_until"] = time.time() + _PROVIDER_COOLDOWN
+            h["consecutive_failures"] = 0
+            log.warning(f"⏸️ Provider '{provider}' failing repeatedly — skipping for {_PROVIDER_COOLDOWN // 60} min")
 
-    return results
+
+def _provider_ready(provider: str) -> bool:
+    h = _provider_health.get(provider)
+    return not h or time.time() >= h.get("skip_until", 0)
 
 
-def _base_ydl_opts(proxy_url: str | None = None) -> dict:
-    """Return base yt-dlp options shared across extraction modes."""
+def _provider_configured(provider: str) -> bool:
+    if provider == "scrapecreators":
+        return bool(os.getenv("SCRAPECREATORS_API_KEY", "").strip())
+    if provider == "apify":
+        return bool(os.getenv("APIFY_TOKEN", "").strip())
+    if provider == "tikwm":
+        return os.getenv("ENABLE_TIKWM", "true").strip().lower() != "false"
+    return provider == "ytdlp"
+
+
+def get_provider_order() -> list[str]:
+    raw = os.getenv("FETCH_PROVIDERS", "").strip()
+    order = [p.strip().lower() for p in raw.split(",") if p.strip()] if raw else DEFAULT_PROVIDER_ORDER
+    return [p for p in order if p in DEFAULT_PROVIDER_ORDER]
+
+
+def get_provider_status() -> dict:
+    now = time.time()
+    return {
+        p: {
+            "configured": _provider_configured(p),
+            "cooling_down": now < _provider_health.get(p, {}).get("skip_until", 0),
+            **{k: v for k, v in _provider_health.get(p, {}).items() if k != "skip_until"},
+        }
+        for p in get_provider_order()
+    }
+
+
+# ══════════════════════════════════════════════════════════════
+#  Helpers
+# ══════════════════════════════════════════════════════════════
+
+def _clean_user(username: str) -> str:
+    return username.strip().lstrip("@").strip()
+
+
+def _page_url(author: str, vid_id: str) -> str:
+    return f"https://www.tiktok.com/@{author}/video/{vid_id}" if author else f"https://www.tiktok.com/video/{vid_id}"
+
+
+def _first_url(obj) -> str:
+    if isinstance(obj, dict):
+        lst = obj.get("url_list") or []
+        return lst[0] if lst else (obj.get("url") or "")
+    if isinstance(obj, list) and obj:
+        return obj[0] if isinstance(obj[0], str) else ""
+    return obj if isinstance(obj, str) else ""
+
+
+def _to_seconds(value) -> int:
+    try:
+        v = float(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    return int(round(v / 1000)) if v > 1000 else int(round(v))  # TikTok mobile API uses ms
+
+
+def _is_cloudflare_challenge(resp: requests.Response) -> bool:
+    if resp.status_code not in (403, 429, 503):
+        return False
+    body = resp.text[:2000].lower()
+    return "just a moment" in body or "challenges.cloudflare.com" in body or "cf-chl" in body
+
+
+def _video(vid_id, author, caption, play, duration, width, height, cover, ts, source) -> dict:
+    return {
+        "id": str(vid_id),
+        "title": caption or "",
+        "play": play or _page_url(author, str(vid_id)),
+        "page_url": _page_url(author, str(vid_id)),
+        "duration": _to_seconds(duration),
+        "width": int(width or 0),
+        "height": int(height or 0),
+        "cover": cover or "",
+        "author": author,
+        "timestamp": int(ts or 0),
+        "source": source,
+    }
+
+
+# ══════════════════════════════════════════════════════════════
+#  Provider 1: ScrapeCreators
+# ══════════════════════════════════════════════════════════════
+
+def _sc_headers() -> dict:
+    return {"x-api-key": os.getenv("SCRAPECREATORS_API_KEY", "").strip()}
+
+
+def _sc_check(resp: requests.Response) -> dict:
+    if resp.status_code in (401, 403):
+        raise ProviderBlocked(f"ScrapeCreators auth error HTTP {resp.status_code} (check SCRAPECREATORS_API_KEY)")
+    if resp.status_code == 402:
+        raise ProviderBlocked("ScrapeCreators out of credits (HTTP 402)", cooldown=3600)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def _parse_aweme(aw: dict, author: str, source: str) -> dict | None:
+    if not isinstance(aw, dict) or aw.get("image_post_info"):
+        return None  # skip photo slideshows
+    vid_id = aw.get("aweme_id") or aw.get("id")
+    if not vid_id:
+        return None
+    v = aw.get("video") or {}
+    play = _first_url(v.get("play_addr")) or _first_url(v.get("download_addr"))
+    cover = _first_url(v.get("cover")) or _first_url(v.get("origin_cover"))
+    author = ((aw.get("author") or {}).get("unique_id")) or author
+    return _video(
+        vid_id, author, aw.get("desc", ""), play,
+        v.get("duration") or aw.get("duration"),
+        v.get("width") or (v.get("play_addr") or {}).get("width"),
+        v.get("height") or (v.get("play_addr") or {}).get("height"),
+        cover, aw.get("create_time"), source,
+    )
+
+
+def fetch_scrapecreators(username: str, count: int = 5) -> list[dict]:
+    user = _clean_user(username)
+    resp = requests.get(
+        f"{SCRAPECREATORS_BASE}/v3/tiktok/profile/videos",
+        params={"handle": user, "sort_by": "latest"},
+        headers=_sc_headers(),
+        timeout=45,
+    )
+    data = _sc_check(resp)
+    items = data.get("aweme_list") or data.get("videos") or []
+    out = [v for v in (_parse_aweme(a, user, "scrapecreators") for a in items) if v]
+    return out[:count]
+
+
+def resolve_scrapecreators_video(page_url: str) -> str:
+    """Get a fresh no-watermark MP4 URL for one video (CDN URLs expire after a few hours)."""
+    resp = requests.get(
+        f"{SCRAPECREATORS_BASE}/v2/tiktok/video",
+        params={"url": page_url},
+        headers=_sc_headers(),
+        timeout=45,
+    )
+    data = _sc_check(resp)
+    aw = data.get("aweme_detail") or data.get("aweme") or data
+    parsed = _parse_aweme(aw, "", "scrapecreators")
+    return parsed["play"] if parsed and parsed["play"].startswith("http") and "tiktok.com/@" not in parsed["play"] else ""
+
+
+# ══════════════════════════════════════════════════════════════
+#  Provider 2: Apify (clockworks/tiktok-scraper)
+# ══════════════════════════════════════════════════════════════
+
+def fetch_apify(username: str, count: int = 5) -> list[dict]:
+    user = _clean_user(username)
+    download = os.getenv("APIFY_DOWNLOAD_VIDEOS", "true").strip().lower() != "false"
+    resp = requests.post(
+        f"https://api.apify.com/v2/acts/{APIFY_ACTOR}/run-sync-get-dataset-items",
+        params={"token": os.getenv("APIFY_TOKEN", "").strip()},
+        json={
+            "profiles": [user],
+            "resultsPerPage": count,
+            "profileScrapeSections": ["videos"],
+            "profileSorting": "latest",
+            "excludePinnedPosts": True,
+            "shouldDownloadVideos": download,
+            "shouldDownloadCovers": False,
+            "shouldDownloadSubtitles": False,
+            "shouldDownloadSlideshowImages": False,
+        },
+        timeout=300,
+    )
+    if resp.status_code in (401, 403):
+        raise ProviderBlocked(f"Apify auth error HTTP {resp.status_code} (check APIFY_TOKEN)")
+    if resp.status_code == 402:
+        raise ProviderBlocked("Apify account out of credits (HTTP 402)", cooldown=3600)
+    resp.raise_for_status()
+    items = resp.json() or []
+
+    out = []
+    for it in items:
+        if not isinstance(it, dict) or it.get("isSlideshow") or not it.get("id"):
+            continue
+        meta = it.get("videoMeta") or {}
+        media = it.get("mediaUrls") or []
+        play = media[0] if media else (it.get("webVideoUrl") or "")
+        author = (it.get("authorMeta") or {}).get("name") or user
+        out.append(_video(
+            it["id"], author, it.get("text", ""), play,
+            meta.get("duration"), meta.get("width"), meta.get("height"),
+            meta.get("coverUrl") or meta.get("originalCoverUrl"),
+            it.get("createTime"), "apify",
+        ))
+    return out[:count]
+
+
+# ══════════════════════════════════════════════════════════════
+#  Provider 3: yt-dlp through the proxy chain
+# ══════════════════════════════════════════════════════════════
+
+def _ydl_opts(proxy_url: str | None, **extra) -> dict:
     opts = {
         "quiet": True,
         "no_warnings": True,
-        "ignoreerrors": True,
+        "noprogress": True,
         "no_color": True,
-        "socket_timeout": 25,
-        "retries": 2,
-        "http_headers": {
-            "User-Agent": (
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/131.0.0.0 Safari/537.36"
-            ),
-            "Referer": "https://www.tiktok.com/",
-        },
+        "socket_timeout": 20,
+        "retries": 1,
+        "extractor_retries": 1,
+        "http_headers": {"User-Agent": BROWSER_UA, "Referer": "https://www.tiktok.com/"},
     }
     if IMPERSONATE_TARGET:
         opts["impersonate"] = IMPERSONATE_TARGET
     if proxy_url:
         opts["proxy"] = proxy_url
+    opts.update(extra)
     return opts
 
 
+def fetch_ytdlp(username: str, count: int = 5) -> list[dict]:
+    user = _clean_user(username)
+    url = f"https://www.tiktok.com/@{user}"
+    last_err = "no routes"
+    for route in proxy_manager.get_ordered_proxy_routes():
+        for flat in (True, False):
+            mode_label = "flat" if flat else "full-waf"
+            try:
+                log.info(f"  🔄 yt-dlp listing @{user} via {route['name']} ({mode_label})...")
+                with yt_dlp.YoutubeDL(_ydl_opts(route["proxy"], extract_flat=flat, playlistend=count)) as ydl:
+                    info = ydl.extract_info(url, download=False) or {}
+                entries = [e for e in (info.get("entries") or []) if e and e.get("id")]
+                if entries:
+                    proxy_manager.record_route_result(route["name"], True)
+                    return [
+                        _video(e["id"], user, e.get("description") or e.get("title", ""),
+                               _page_url(user, str(e["id"])), e.get("duration"),
+                               e.get("width"), e.get("height"), e.get("thumbnail"),
+                               e.get("timestamp"), f"ytdlp:{route['name']}")
+                        for e in entries[:count]
+                    ]
+                last_err = "empty result (ISP/IP blocked)"
+            except Exception as e:
+                last_err = str(e)[:200]
+        proxy_manager.record_route_result(route["name"], False, last_err)
+    raise RuntimeError(f"yt-dlp failed on all routes: {last_err}")
+
+
 # ══════════════════════════════════════════════════════════════
-#  Layer A: TikWM API Client (Zero-Block Datacenter Fallback)
+#  Provider 4: TikWM (no challenge circumvention)
 # ══════════════════════════════════════════════════════════════
 
-TIKWM_USER_API = "https://www.tikwm.com/api/user/posts"
-TIKWM_VIDEO_API = "https://www.tikwm.com/api/"
-
-
-def fetch_user_videos_tikwm(username: str, count: int = 5) -> list[dict]:
-    """
-    Fetch latest videos for a TikTok user via TikWM public API.
-    Works reliably even when datacenter IPs are blocked by TikTok's WAF.
-    """
-    clean_user = username.lstrip("@").strip()
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-        ),
-        "Accept": "application/json, text/javascript, */*; q=0.01",
-        "Referer": "https://www.tikwm.com/",
-    }
-
-    # Try routes (usually direct works great with TikWM, or via proxy if needed)
-    routes = proxy_manager.get_ordered_proxy_routes()
-    # Put direct first for TikWM since TikWM itself is a proxy gateway and doesn't block Render IPs
-    direct_first_routes = sorted(routes, key=lambda r: 0 if r["type"] == "direct" else 1)
-
-    for route in direct_first_routes[:2]:
-        proxy_url = route.get("proxy")
-        proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
-        try:
-            resp = requests.post(
-                TIKWM_USER_API,
-                data={"unique_id": f"@{clean_user}", "count": max(count, 10), "cursor": 0},
-                headers=headers,
-                proxies=proxies,
-                timeout=20,
-            )
-            if resp.status_code != 200:
-                continue
-
-            payload = resp.json()
-            if payload.get("code") != 0:
-                log.debug(f"  TikWM API returned code {payload.get('code')}: {payload.get('msg')}")
-                continue
-
-            videos_raw = (payload.get("data") or {}).get("videos") or []
-            if not videos_raw:
-                continue
-
-            results = []
-            for v in videos_raw[:count]:
-                vid_id = str(v.get("video_id", "")).strip()
-                if not vid_id:
-                    continue
-
-                play_url = v.get("hdplay") or v.get("play") or v.get("wmplay") or ""
-                if play_url and play_url.startswith("/"):
-                    play_url = f"https://www.tikwm.com{play_url}"
-
-                cover_url = v.get("cover") or v.get("origin_cover") or ""
-                if cover_url and cover_url.startswith("/"):
-                    cover_url = f"https://www.tikwm.com{cover_url}"
-
-                results.append({
-                    "id": vid_id,
-                    "title": v.get("title", "") or "",
-                    "play": play_url or f"https://www.tiktok.com/@{clean_user}/video/{vid_id}",
-                    "duration": int(v.get("duration", 0) or 0),
-                    "width": int(v.get("width", 1080) or 1080),
-                    "height": int(v.get("height", 1920) or 1920),
-                    "cover": cover_url,
-                    "author": clean_user,
-                    "timestamp": int(v.get("create_time", 0) or 0),
-                })
-
-            if results:
-                proxy_manager.record_route_result("tikwm_api", True)
-                log.info(f"📥 [TikWM API] Fetched {len(results)} videos from @{clean_user}")
-                return results
-
-        except Exception as e:
-            log.debug(f"  TikWM fetch error via {route['name']} for @{clean_user}: {e}")
-            proxy_manager.record_route_result("tikwm_api", False, str(e))
-
-    return []
-
-
-def download_video_tikwm(tiktok_id: str, author: str, output_path: str, direct_stream_url: str = "") -> str | None:
-    """
-    Download HD no-watermark MP4 using TikWM API or a pre-fetched TikWM stream URL.
-    Requires zero FFmpeg (downloads single pre-muxed MP4 directly).
-    """
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-        ),
-        "Referer": "https://www.tikwm.com/",
-    }
-
-    stream_url = direct_stream_url if (direct_stream_url and "tikwm.com" in direct_stream_url) else ""
-
-    if not stream_url:
-        tiktok_page_url = (
-            f"https://www.tiktok.com/@{author}/video/{tiktok_id}"
-            if author else f"https://www.tiktok.com/video/{tiktok_id}"
-        )
-        try:
-            log.info(f"  🌐 [TikWM] Resolving HD stream for {tiktok_id}...")
-            resp = requests.post(
-                TIKWM_VIDEO_API,
-                data={"url": tiktok_page_url, "hd": 1},
-                headers=headers,
-                timeout=20,
-            )
-            if resp.status_code == 200:
-                payload = resp.json()
-                data = payload.get("data") or {}
-                stream_url = data.get("hdplay") or data.get("play") or data.get("wmplay") or ""
-                if stream_url and stream_url.startswith("/"):
-                    stream_url = f"https://www.tikwm.com{stream_url}"
-        except Exception as e:
-            log.debug(f"  [TikWM] Stream resolution failed for {tiktok_id}: {e}")
-
-    if not stream_url:
-        return None
-
+def _tikwm_post(url: str, data: dict) -> dict:
+    resp = requests.post(
+        url, data=data, timeout=20,
+        headers={"User-Agent": BROWSER_UA, "Accept": "application/json", "Referer": "https://www.tikwm.com/"},
+    )
+    if _is_cloudflare_challenge(resp):
+        raise ProviderBlocked("TikWM is serving a Cloudflare 'verify you are human' page — skipping (not bypassing)")
+    resp.raise_for_status()
     try:
-        log.info(f"  ⬇️ [TikWM] Downloading MP4 stream for {tiktok_id}...")
-        with requests.get(stream_url, headers=headers, stream=True, timeout=60) as r:
-            r.raise_for_status()
-            with open(output_path, "wb") as f:
-                for chunk in r.iter_content(chunk_size=256 * 1024):
-                    if chunk:
-                        f.write(chunk)
-
-        if os.path.exists(output_path) and os.path.getsize(output_path) > 10000:
-            size_mb = os.path.getsize(output_path) / (1024 * 1024)
-            log.info(f"  ✅ [TikWM] Downloaded {tiktok_id} ({size_mb:.1f} MB)")
-            proxy_manager.record_route_result("tikwm_download", True)
-            return output_path
-        else:
-            if os.path.exists(output_path):
-                os.remove(output_path)
-    except Exception as e:
-        log.debug(f"  [TikWM] MP4 download error for {tiktok_id}: {e}")
-        proxy_manager.record_route_result("tikwm_download", False, str(e))
-        if os.path.exists(output_path):
-            os.remove(output_path)
-
-    return None
+        payload = resp.json()
+    except ValueError:
+        raise RuntimeError("TikWM returned non-JSON response")
+    if payload.get("code") != 0:
+        raise RuntimeError(f"TikWM error: {payload.get('msg')}")
+    return payload.get("data") or {}
 
 
-# ══════════════════════════════════════════════════════════════
-#  Layer B: yt-dlp with Proxy Chain + TLS Impersonation + WAF Solver
-# ══════════════════════════════════════════════════════════════
-
-def fetch_user_videos_ytdlp(username: str, count: int = 5) -> list[dict]:
-    """
-    Fetch latest videos for a TikTok user using yt-dlp across configured proxy routes.
-    Tries fast flat extraction first, then full WAF-solver extraction if needed.
-    """
-    url = f"https://www.tiktok.com/@{username}"
-    routes = proxy_manager.get_ordered_proxy_routes()
-
-    for route in routes:
-        route_name = route["name"]
-        proxy_url = route["proxy"]
-
-        # Pass 1: Fast flat extraction
-        flat_opts = _base_ydl_opts(proxy_url)
-        flat_opts["extract_flat"] = True
-        flat_opts["playlistend"] = count
-
-        try:
-            with yt_dlp.YoutubeDL(flat_opts) as ydl:
-                log.info(f"  🔄 yt-dlp extracting @{username} (flat, route={route_name})...")
-                info = ydl.extract_info(url, download=False)
-                if info:
-                    entries = info.get("entries", [])
-                    if not entries and info.get("id"):
-                        entries = [info]
-                    if entries:
-                        results = _parse_entries(entries, username)
-                        if results:
-                            proxy_manager.record_route_result(route_name, True)
-                            log.info(f"📥 yt-dlp fetched {len(results)} videos from @{username} (flat, route={route_name})")
-                            return results
-        except Exception as e:
-            log.debug(f"  Flat extraction failed on {route_name} for @{username}: {e}")
-
-        # Pass 2: Full extraction (triggers patched WAF challenge solver)
-        log.info(f"  🔁 Retrying @{username} with full WAF solver (route={route_name})...")
-        full_opts = _base_ydl_opts(proxy_url)
-        full_opts["extract_flat"] = False
-        full_opts["playlistend"] = count
-        full_opts["socket_timeout"] = 45
-        full_opts["retries"] = 2
-
-        try:
-            with yt_dlp.YoutubeDL(full_opts) as ydl:
-                info = ydl.extract_info(url, download=False)
-                if info:
-                    entries = info.get("entries", [])
-                    if not entries and info.get("id"):
-                        entries = [info]
-                    if entries:
-                        results = _parse_entries(entries, username)
-                        if results:
-                            proxy_manager.record_route_result(route_name, True)
-                            log.info(f"📥 yt-dlp fetched {len(results)} videos from @{username} (full, route={route_name})")
-                            return results
-        except Exception as e:
-            log.debug(f"  Full extraction failed on {route_name} for @{username}: {e}")
-            proxy_manager.record_route_result(route_name, False, str(e))
-
-    return []
+def _tikwm_abs(u: str) -> str:
+    return f"https://www.tikwm.com{u}" if u and u.startswith("/") else (u or "")
 
 
-def download_video_ytdlp(tiktok_page_url: str, tiktok_id: str, output_path: str) -> str | None:
-    """
-    Download a TikTok video using yt-dlp across configured proxy routes.
-    Uses single pre-muxed MP4 format ('best[ext=mp4]/b[ext=mp4]/best') so FFmpeg
-    is NEVER needed to merge separate video+audio streams on Render Free Tier.
-    """
-    routes = proxy_manager.get_ordered_proxy_routes()
+def fetch_tikwm(username: str, count: int = 5) -> list[dict]:
+    user = _clean_user(username)
+    data = _tikwm_post(TIKWM_USER_API, {"unique_id": f"@{user}", "count": max(count, 10), "cursor": 0})
+    out = []
+    for v in (data.get("videos") or [])[:count]:
+        if not v.get("video_id") or v.get("images"):
+            continue
+        out.append(_video(
+            v["video_id"], user, v.get("title", ""),
+            _tikwm_abs(v.get("hdplay") or v.get("play")),
+            v.get("duration"), v.get("width") or 1080, v.get("height") or 1920,
+            _tikwm_abs(v.get("cover") or v.get("origin_cover")), v.get("create_time"), "tikwm",
+        ))
+    return out
 
-    for route in routes:
-        route_name = route["name"]
-        proxy_url = route["proxy"]
 
-        ydl_opts = {
-            "quiet": True,
-            "no_warnings": True,
-            "no_color": True,
-            "outtmpl": output_path,
-            # Pre-muxed single MP4 stream (contains both video & audio — zero FFmpeg required!)
-            "format": "best[ext=mp4]/b[ext=mp4]/best",
-            "format_sort": ["res:1080", "fps:60", "vcodec:h264", "br"],
-            "socket_timeout": 90,
-            "retries": 3,
-            "overwrites": True,
-            "http_headers": {
-                "User-Agent": (
-                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/131.0.0.0 Safari/537.36"
-                ),
-                "Referer": "https://www.tiktok.com/",
-            },
-        }
+def resolve_tikwm_video(page_url: str) -> str:
+    data = _tikwm_post(TIKWM_VIDEO_API, {"url": page_url, "hd": 1})
+    return _tikwm_abs(data.get("hdplay") or data.get("play") or "")
 
-        if IMPERSONATE_TARGET:
-            ydl_opts["impersonate"] = IMPERSONATE_TARGET
-        if proxy_url:
-            ydl_opts["proxy"] = proxy_url
 
-        try:
-            log.info(f"  ⬇️ yt-dlp downloading {tiktok_id} (route={route_name})...")
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([tiktok_page_url])
-
-            if os.path.exists(output_path) and os.path.getsize(output_path) > 10000:
-                file_size = os.path.getsize(output_path)
-                proxy_manager.record_route_result(route_name, True)
-                log.info(f"  ✅ Downloaded {tiktok_id} via yt-dlp/{route_name} ({file_size / 1024 / 1024:.1f} MB)")
-                return output_path
-            else:
-                if os.path.exists(output_path):
-                    os.remove(output_path)
-        except Exception as e:
-            log.warning(f"  ⚠️ yt-dlp download failed on {route_name}: {e}")
-            proxy_manager.record_route_result(route_name, False, str(e))
-            if os.path.exists(output_path):
-                os.remove(output_path)
-
-    return None
+_FETCHERS = {
+    "scrapecreators": fetch_scrapecreators,
+    "apify": fetch_apify,
+    "ytdlp": fetch_ytdlp,
+    "tikwm": fetch_tikwm,
+}
 
 
 # ══════════════════════════════════════════════════════════════
-#  Public Unified API (Used by bot.py & run_batch.py)
+#  Public API
 # ══════════════════════════════════════════════════════════════
 
 def get_user_videos(username: str, count: int = 5) -> list[dict]:
-    """
-    Fetch the latest videos from a TikTok user using our multi-layered fallback system:
-      - If mode == 'tikwm_first': tries TikWM API -> yt-dlp (with proxy chain)
-      - Otherwise: tries yt-dlp (with proxy chain: Custom Proxy -> WARP -> Direct) -> TikWM API
-    """
-    mode = proxy_manager.get_proxy_mode()
+    """Try each configured, healthy provider in order until one returns videos."""
+    user = _clean_user(username)
+    errors = []
+    for provider in get_provider_order():
+        if not _provider_configured(provider):
+            continue
+        if not _provider_ready(provider):
+            errors.append(f"{provider}: cooling down")
+            continue
+        try:
+            videos = _FETCHERS[provider](user, count)
+            if videos:
+                _record(provider, True)
+                log.info(f"📥 [{provider}] fetched {len(videos)} videos from @{user}")
+                return videos
+            _record(provider, False, "empty result")
+            errors.append(f"{provider}: empty")
+        except ProviderBlocked as e:
+            _record(provider, False, str(e), cooldown=e.cooldown)
+            errors.append(f"{provider}: {e}")
+        except Exception as e:
+            _record(provider, False, str(e))
+            errors.append(f"{provider}: {str(e)[:150]}")
+            log.warning(f"  ⚠️ [{provider}] failed for @{user}: {str(e)[:200]}")
 
-    if mode == "tikwm_first":
-        videos = fetch_user_videos_tikwm(username, count=count)
-        if videos:
-            return videos
-        log.info(f"  🔁 TikWM empty for @{username}, falling back to yt-dlp proxy chain...")
-        return fetch_user_videos_ytdlp(username, count=count)
-
-    # Default ('auto', 'warp', 'custom_proxy', 'direct'):
-    videos = fetch_user_videos_ytdlp(username, count=count)
-    if videos:
-        return videos
-
-    log.info(f"  🔁 yt-dlp blocked/empty for @{username}, falling back to TikWM API...")
-    videos = fetch_user_videos_tikwm(username, count=count)
-    if videos:
-        return videos
-
-    log.error(f"  ❌ All scraper layers failed to fetch videos for @{username}")
+    log.error(f"  ❌ All providers failed for @{user}: {' | '.join(errors) or 'none configured'}")
     return []
 
 
-def download_video(video_url: str, tiktok_id: str, author: str = "") -> str | None:
-    """
-    Download a TikTok video using the multi-layer fallback system (zero FFmpeg required).
-    """
-    output_path = os.path.join(config.TEMP_DIR, f"tiktok_{tiktok_id}.mp4")
+def _looks_like_mp4(path: str) -> bool:
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(12)
+        return len(head) >= 8 and head[4:8] == b"ftyp"
+    except OSError:
+        return False
 
-    if os.path.exists(output_path) and os.path.getsize(output_path) > 10000:
-        file_size = os.path.getsize(output_path)
-        log.info(f"Video {tiktok_id} already downloaded ({file_size / 1024 / 1024:.1f} MB), skipping")
+
+def _download_direct(url: str, output_path: str) -> bool:
+    """Stream a direct MP4 URL to disk, trying direct first then proxy routes."""
+    if not url or not url.startswith("http") or "tiktok.com/@" in url:
+        return False
+    routes = [{"name": "direct", "proxy": None}] + [
+        r for r in proxy_manager.get_ordered_proxy_routes() if r["proxy"]
+    ]
+    headers = {"User-Agent": BROWSER_UA, "Referer": "https://www.tiktok.com/"}
+    for route in routes:
+        proxies = {"http": route["proxy"], "https": route["proxy"]} if route["proxy"] else None
+        try:
+            with requests.get(url, headers=headers, proxies=proxies, stream=True, timeout=(15, 90)) as r:
+                if r.status_code != 200:
+                    continue
+                with open(output_path, "wb") as fh:
+                    for chunk in r.iter_content(chunk_size=256 * 1024):
+                        if chunk:
+                            fh.write(chunk)
+            if os.path.getsize(output_path) > 10_000 and _looks_like_mp4(output_path):
+                return True
+        except Exception as e:
+            log.debug(f"  direct download via {route['name']} failed: {e}")
+        if os.path.exists(output_path):
+            os.remove(output_path)
+    return False
+
+
+def _download_ytdlp(page_url: str, output_path: str) -> bool:
+    for route in proxy_manager.get_ordered_proxy_routes():
+        try:
+            opts = _ydl_opts(
+                route["proxy"],
+                outtmpl=output_path,
+                overwrites=True,
+                format="best[ext=mp4][vcodec!=none][acodec!=none]/best[ext=mp4]/best",
+                socket_timeout=60,
+                retries=2,
+            )
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                ydl.download([page_url])
+            if os.path.exists(output_path) and os.path.getsize(output_path) > 10_000:
+                proxy_manager.record_route_result(route["name"], True)
+                return True
+            proxy_manager.record_route_result(route["name"], False, "no file")
+        except Exception as e:
+            proxy_manager.record_route_result(route["name"], False, str(e))
+        if os.path.exists(output_path):
+            os.remove(output_path)
+    return False
+
+
+def download_video(video_url: str, tiktok_id: str, author: str = "") -> str | None:
+    """Download a TikTok video as a single MP4 (no FFmpeg). Returns path or None."""
+    output_path = os.path.join(config.TEMP_DIR, f"tiktok_{tiktok_id}.mp4")
+    if os.path.exists(output_path) and os.path.getsize(output_path) > 10_000:
         return output_path
 
-    if author:
-        tiktok_page_url = f"https://www.tiktok.com/@{author}/video/{tiktok_id}"
-    else:
-        tiktok_page_url = video_url
+    author = _clean_user(author)
+    page_url = _page_url(author, tiktok_id)
 
-    mode = proxy_manager.get_proxy_mode()
+    attempts = [("stored direct URL", lambda: _download_direct(video_url, output_path))]
+    if _provider_configured("scrapecreators") and _provider_ready("scrapecreators"):
+        attempts.append(("ScrapeCreators fresh URL",
+                         lambda: _download_direct(resolve_scrapecreators_video(page_url), output_path)))
+    attempts.append(("yt-dlp", lambda: _download_ytdlp(page_url, output_path)))
+    if _provider_configured("tikwm") and _provider_ready("tikwm"):
+        attempts.append(("TikWM", lambda: _download_direct(resolve_tikwm_video(page_url), output_path)))
 
-    # If video_url is already a direct TikWM stream or mode is tikwm_first, try TikWM download first
-    if mode == "tikwm_first" or (video_url and "tikwm.com" in video_url):
-        res = download_video_tikwm(tiktok_id, author, output_path, direct_stream_url=video_url)
-        if res:
-            return res
-        return download_video_ytdlp(tiktok_page_url, tiktok_id, output_path)
+    for label, fn in attempts:
+        try:
+            log.info(f"  ⬇️ Downloading {tiktok_id} via {label}...")
+            if fn():
+                size_mb = os.path.getsize(output_path) / (1024 * 1024)
+                log.info(f"  ✅ Downloaded {tiktok_id} via {label} ({size_mb:.1f} MB)")
+                return output_path
+        except ProviderBlocked as e:
+            _record("tikwm" if "TikWM" in label else "scrapecreators", False, str(e), cooldown=e.cooldown)
+        except Exception as e:
+            log.warning(f"  ⚠️ {label} download failed for {tiktok_id}: {str(e)[:200]}")
 
-    # Otherwise try yt-dlp (via proxy chain) first, then fall back to TikWM API
-    res = download_video_ytdlp(tiktok_page_url, tiktok_id, output_path)
-    if res:
-        return res
-
-    log.info(f"  🔁 yt-dlp download failed for {tiktok_id}, falling back to TikWM HD downloader...")
-    return download_video_tikwm(tiktok_id, author, output_path, direct_stream_url=video_url)
+    log.error(f"  ❌ Could not download {tiktok_id} with any method")
+    return None
 
 
 def fetch_all_new_videos(max_per_account: int = 5) -> list[dict]:
     """
-    Grab ALL eligible Shorts (<= 60s) from each monitored TikTok account.
-
-    Filters out:
-      - Videos longer than 60s (not Shorts)
-      - Landscape videos (not vertical)
-      - Videos older than VIDEO_MAX_AGE_HOURS
-      - Already-processed videos
-
-    Returns videos sorted by timestamp (newest first).
+    Collect fresh, unprocessed, vertical Shorts from every monitored account.
+    Sorted newest first.
     """
     from database import is_video_processed
     from datetime import datetime, timezone, timedelta
+    import settings_manager
 
     max_age_hours = config.get_video_max_age_hours()
-    cutoff_time = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
-    cutoff_ts = cutoff_time.timestamp()
+    max_duration = int(settings_manager.get("max_short_duration_seconds", 60) or 60)
+    cutoff_ts = (datetime.now(timezone.utc) - timedelta(hours=max_age_hours)).timestamp()
 
-    all_new = []
-    seen_ids = set()
+    all_new: list[dict] = []
+    seen: set[str] = set()
 
-    usernames = config._get_tiktok_usernames()
-    for idx, username in enumerate(usernames):
-        if idx > 0:
-            # Polite 1.2s delay between accounts to avoid rate-limiting
-            time.sleep(1.2)
+    for idx, raw_user in enumerate(config._get_tiktok_usernames()):
+        username = _clean_user(raw_user)
+        if not username:
+            continue
+        if idx:
+            time.sleep(1.5)
 
         log.info(f"🔍 Checking @{username} for new Shorts...")
-        videos = get_user_videos(username, count=max_per_account)
-
-        if not videos:
-            log.info(f"  ⏭️ No videos found for @{username}, skipping")
-            continue
-
-        added_from_user = 0
-        for video in videos:
+        added = 0
+        for video in get_user_videos(username, count=max_per_account):
             vid_id = video["id"]
-            if not vid_id or vid_id in seen_ids:
+            if vid_id in seen:
                 continue
-
             duration = video.get("duration", 0)
-
-            # YouTube Shorts must be 60 seconds or less
-            if duration > 60:
-                log.info(f"  ⏭️ Video {vid_id} from @{username} is {duration}s (>60s), skipping (not a Short)")
+            if duration and duration > max_duration:
+                log.info(f"  ⏭️ {vid_id}: {duration}s > {max_duration}s, skipping")
                 continue
-
-            width = video.get("width", 0)
-            height = video.get("height", 0)
-
-            # YouTube Shorts must be vertical or square
-            if width > height and width != 0 and height != 0:
-                log.info(f"  ⏭️ Video {vid_id} from @{username} is landscape ({width}x{height}), skipping (not a Short)")
+            w, h = video.get("width", 0), video.get("height", 0)
+            if w and h and w > h:
+                log.info(f"  ⏭️ {vid_id}: landscape {w}x{h}, skipping")
                 continue
-
-            # Freshness check: skip videos older than cutoff
-            video_ts = video.get("timestamp", 0)
-            if video_ts and video_ts < cutoff_ts:
-                age_hours = (datetime.now(timezone.utc).timestamp() - video_ts) / 3600
-                log.info(f"  ⏭️ Video {vid_id} from @{username} is {age_hours:.1f}h old (>{max_age_hours}h), expired — skipping")
+            ts = video.get("timestamp", 0)
+            if ts and ts < cutoff_ts:
                 continue
-
             if is_video_processed(vid_id):
-                log.info(f"  ⏭️ Video {vid_id} from @{username} already processed, skipping")
                 continue
-
-            log.info(f"  🆕 New Short from @{username}: {vid_id} ({duration}s)")
-            seen_ids.add(vid_id)
+            seen.add(vid_id)
             all_new.append(video)
-            added_from_user += 1
-
-        if added_from_user:
-            log.info(f"  📦 Collected {added_from_user} new Shorts from @{username}")
+            added += 1
+        if added:
+            log.info(f"  📦 {added} new Shorts from @{username}")
 
     all_new.sort(key=lambda v: v.get("timestamp", 0), reverse=True)
     log.info(f"🆕 Found {len(all_new)} new fresh Shorts across all accounts")
     return all_new
+
+
+def test_providers(username: str) -> dict:
+    """Try every provider individually (ignoring cooldowns) and report results."""
+    user = _clean_user(username)
+    results = {}
+    for provider in get_provider_order():
+        if not _provider_configured(provider):
+            results[provider] = {"ok": False, "status": "not_configured"}
+            continue
+        t0 = time.time()
+        try:
+            vids = _FETCHERS[provider](user, 2)
+            results[provider] = {
+                "ok": bool(vids),
+                "videos": len(vids),
+                "sample_id": vids[0]["id"] if vids else None,
+                "latency_ms": int((time.time() - t0) * 1000),
+            }
+            _record(provider, bool(vids), "" if vids else "empty result")
+        except Exception as e:
+            results[provider] = {"ok": False, "error": str(e)[:240], "latency_ms": int((time.time() - t0) * 1000)}
+            _record(provider, False, str(e), cooldown=getattr(e, "cooldown", None))
+    return results

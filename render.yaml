@@ -28,6 +28,10 @@ services:
         sync: false
       - key: PROXY_URLS
         sync: false
+      - key: SCRAPECREATORS_API_KEY
+        sync: false
+      - key: APIFY_TOKEN
+        sync: false
       - key: YOUTUBE_TOKEN_1
         sync: false
       - key: YOUTUBE_CLIENT_SECRET_1

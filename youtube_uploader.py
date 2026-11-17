@@ -148,6 +148,7 @@ def upload_video(
     seo_description: str = "",
     seo_hashtags: str = "",
     publish_at: str | None = None,
+    allow_fallback: bool = False,
 ) -> tuple[bool, int]:
     """
     Upload a video to YouTube, automatically selecting the channel
@@ -186,6 +187,21 @@ def upload_video(
     if not yt_tags:
         yt_tags = ["shorts", "viral", "trending", "fyp", "tiktok"]
 
+    # YouTube rejects uploads whose tags exceed ~500 chars total ("invalidTags")
+    safe_tags, total = [], 0
+    for t in dict.fromkeys(t[:30] for t in yt_tags if t):
+        cost = len(t) + (2 if " " in t else 0) + 1
+        if total + cost > 450:
+            break
+        safe_tags.append(t)
+        total += cost
+    yt_tags = safe_tags
+
+    # Description limit is 5000 bytes
+    description = description.replace("<", "").replace(">", "")
+    while len(description.encode("utf-8")) > 4900:
+        description = description[:-100]
+
     status_dict = {
         "selfDeclaredMadeForKids": False,
     }
@@ -197,7 +213,6 @@ def upload_video(
         log.info(f"📅 Setting video schedule: private until {publish_at} (UTC)")
     else:
         status_dict["privacyStatus"] = "public"
-        status_dict["shortsVerticalOriginal"] = True
 
     body = {
         "snippet": {
@@ -209,7 +224,10 @@ def upload_video(
         "status": status_dict,
     }
 
-    # ── Retry loop: try next channel if current one is quota-blocked ──
+    # ── Retry loop ──
+    # When a specific target channel is requested (queue/batch flows), we do NOT
+    # silently fall over to another channel — that would desync the queue status
+    # and the per-channel publish schedule. Pass allow_fallback=True to opt in.
     tried_channels = set()
     first_try = True
     while True:
@@ -217,6 +235,8 @@ def upload_video(
             channel = target_channel
             first_try = False
         else:
+            if target_channel > 0 and not allow_fallback:
+                return False, 0
             first_try = False
             channel = _pick_channel(tried_channels)
 

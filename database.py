@@ -1,32 +1,26 @@
 """
-Database module — tracks which TikTok videos have been processed and which
-future publish time slots are already booked per YouTube channel.
+Database module — tracks processed TikTok videos and booked publish slots.
 
-Supports both:
-  1. Local SQLite database (`database.sqlite3`) — Zero setup, runs 100% offline, never pauses.
-  2. Supabase (PostgreSQL) — Cloud database (if active and reachable, persists across Render restarts).
+  1. Supabase (PostgreSQL) — persistent across Render restarts (primary when reachable).
+  2. Local SQLite (`database.sqlite3`) — always written too; offline fallback.
 
-If Supabase is paused or unreachable, it automatically falls back to local SQLite
-so your bot never crashes or halts.
+Reads merge both sources, so dedup and slot-booking keep working even if
+Supabase is temporarily down.
 """
 
 import os
 import sqlite3
 import logging
 from datetime import datetime, timezone
-import config
+
+import supabase_client
 
 log = logging.getLogger(__name__)
 
 SQLITE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "database.sqlite3")
 
-_supabase_client = None
-_supabase_tested = False
-_supabase_working = False
-
 
 def _init_sqlite():
-    """Ensure local SQLite database, table, and scheduled_at column exist."""
     try:
         with sqlite3.connect(SQLITE_PATH) as conn:
             conn.execute("""
@@ -41,10 +35,7 @@ def _init_sqlite():
                     uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
             """)
-            # Auto-migrate existing database if scheduled_at column wasn't present
-            cur = conn.cursor()
-            cur.execute("PRAGMA table_info(processed_videos)")
-            cols = [row[1] for row in cur.fetchall()]
+            cols = [row[1] for row in conn.execute("PRAGMA table_info(processed_videos)").fetchall()]
             if "scheduled_at" not in cols:
                 conn.execute("ALTER TABLE processed_videos ADD COLUMN scheduled_at TEXT;")
             conn.commit()
@@ -52,53 +43,36 @@ def _init_sqlite():
         log.error(f"Failed to initialize SQLite database: {e}")
 
 
-# Initialize SQLite on import
 _init_sqlite()
 
 
-def _get_supabase_client():
-    """Lazy-init Supabase client with reachability check."""
-    global _supabase_client, _supabase_tested, _supabase_working
-    if _supabase_tested:
-        return _supabase_client if _supabase_working else None
+def _sb():
+    return supabase_client.get_client()
 
-    _supabase_tested = True
-    if not config.SUPABASE_URL or not config.SUPABASE_KEY:
-        log.info("📁 Supabase not configured. Using local SQLite database (database.sqlite3).")
-        _supabase_working = False
-        return None
 
+def _parse_ts(value: str) -> float:
     try:
-        from supabase import create_client
-        client = create_client(config.SUPABASE_URL, config.SUPABASE_KEY)
-        client.table("processed_videos").select("id").limit(1).execute()
-        _supabase_client = client
-        _supabase_working = True
-        log.info("☁️ Connected to Supabase cloud database.")
-        return _supabase_client
-    except Exception as e:
-        log.warning(f"⚠️ Supabase unreachable or paused ({e}).")
-        log.info("📁 Seamlessly falling back to local SQLite database (database.sqlite3).")
-        _supabase_working = False
-        return None
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00").replace(" ", "T"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)  # SQLite datetime('now') is UTC
+        return dt.timestamp()
+    except Exception:
+        return 0.0
 
 
 def is_video_processed(tiktok_id: str) -> bool:
-    """Check if a TikTok video ID already exists in the database."""
-    sb = _get_supabase_client()
+    sb = _sb()
     if sb:
         try:
-            result = sb.table("processed_videos").select("id").eq("tiktok_id", tiktok_id).execute()
-            if len(result.data) > 0:
+            result = sb.table("processed_videos").select("id").eq("tiktok_id", tiktok_id).limit(1).execute()
+            if result.data:
                 return True
-        except Exception:
-            pass
+        except Exception as e:
+            supabase_client.mark_failed(e)
 
     try:
         with sqlite3.connect(SQLITE_PATH) as conn:
-            cur = conn.cursor()
-            cur.execute("SELECT id FROM processed_videos WHERE tiktok_id = ?", (tiktok_id,))
-            row = cur.fetchone()
+            row = conn.execute("SELECT 1 FROM processed_videos WHERE tiktok_id = ?", (tiktok_id,)).fetchone()
             return row is not None
     except Exception as e:
         log.error(f"SQLite check error: {e}")
@@ -113,105 +87,112 @@ def mark_video_processed(
     caption: str = "",
     scheduled_at: str | None = None,
 ) -> bool:
-    """Record a processed video in the database (SQLite + Supabase)."""
-    sqlite_ok = False
+    ok = False
     try:
         with sqlite3.connect(SQLITE_PATH) as conn:
             conn.execute(
                 """
-                INSERT OR REPLACE INTO processed_videos 
+                INSERT OR REPLACE INTO processed_videos
                 (tiktok_id, tiktok_user, youtube_id, channel_used, caption, scheduled_at, uploaded_at)
                 VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
                 """,
                 (tiktok_id, tiktok_user, youtube_id, channel_used, caption, scheduled_at),
             )
             conn.commit()
-            sqlite_ok = True
-            log.info(
-                f"✅ [SQLite] Recorded video {tiktok_id} → YouTube {youtube_id} "
-                f"(CH{channel_used}, scheduled={scheduled_at or 'immediate'})"
-            )
+            ok = True
     except Exception as e:
         log.error(f"SQLite insert error: {e}")
 
-    sb = _get_supabase_client()
+    sb = _sb()
     if sb:
         try:
-            payload = {
+            sb.table("processed_videos").upsert({
                 "tiktok_id": tiktok_id,
                 "tiktok_user": tiktok_user,
                 "youtube_id": youtube_id,
                 "channel_used": channel_used,
                 "caption": caption,
-            }
-            sb.table("processed_videos").insert(payload).execute()
-            log.info(f"☁️ [Supabase] Synced video {tiktok_id} → YouTube {youtube_id}")
+                "scheduled_at": scheduled_at,
+                "uploaded_at": datetime.now(timezone.utc).isoformat(),
+            }, on_conflict="tiktok_id").execute()
+            ok = True
         except Exception as e:
-            log.warning(f"Could not sync to Supabase: {e}")
+            log.warning(f"Could not sync video {tiktok_id} to Supabase: {e}")
+            supabase_client.mark_failed(e)
 
-    return sqlite_ok
+    if ok:
+        log.info(f"✅ Recorded {tiktok_id} → YouTube {youtube_id} (CH{channel_used}, publish={scheduled_at or 'now'})")
+    return ok
 
 
 def get_booked_schedule_slots(channel: int) -> set[str]:
-    """Return a set of ISO UTC timestamps already booked for future publication on this channel."""
-    booked = set()
+    """ISO UTC timestamps already booked for future publication on this channel."""
+    booked: set[str] = set()
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    sb = _sb()
+    if sb:
+        try:
+            res = (
+                sb.table("processed_videos")
+                .select("scheduled_at")
+                .eq("channel_used", channel)
+                .gte("scheduled_at", now_iso)
+                .execute()
+            )
+            booked.update(str(r["scheduled_at"]).strip() for r in res.data or [] if r.get("scheduled_at"))
+        except Exception as e:
+            supabase_client.mark_failed(e)
+
     try:
         with sqlite3.connect(SQLITE_PATH) as conn:
-            cur = conn.cursor()
-            cur.execute(
-                """
-                SELECT scheduled_at FROM processed_videos
-                WHERE channel_used = ? AND scheduled_at IS NOT NULL AND scheduled_at != ''
-                """,
-                (channel,),
-            )
-            for row in cur.fetchall():
-                if row and row[0]:
-                    booked.add(str(row[0]).strip())
+            rows = conn.execute(
+                "SELECT scheduled_at FROM processed_videos "
+                "WHERE channel_used = ? AND scheduled_at IS NOT NULL AND scheduled_at >= ?",
+                (channel, now_iso),
+            ).fetchall()
+            booked.update(str(r[0]).strip() for r in rows if r and r[0])
     except Exception as e:
         log.debug(f"SQLite booked slots lookup error: {e}")
     return booked
 
 
 def get_today_upload_count(channel: int) -> int:
-    """Return how many videos were uploaded today for a specific channel."""
-    sb = _get_supabase_client()
+    """How many uploads happened today (UTC) on a channel."""
+    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    sb_count = 0
+    sb = _sb()
     if sb:
         try:
-            today_start = datetime.now(timezone.utc).replace(
-                hour=0, minute=0, second=0, microsecond=0
-            ).isoformat()
             result = (
                 sb.table("processed_videos")
                 .select("id", count="exact")
                 .eq("channel_used", channel)
-                .gte("uploaded_at", today_start)
+                .gte("uploaded_at", today_start.isoformat())
                 .execute()
             )
-            return result.count or 0
-        except Exception:
-            pass
+            sb_count = result.count or 0
+        except Exception as e:
+            supabase_client.mark_failed(e)
 
+    local_count = 0
     try:
         with sqlite3.connect(SQLITE_PATH) as conn:
-            cur = conn.cursor()
-            cur.execute(
-                """
-                SELECT COUNT(*) FROM processed_videos
-                WHERE channel_used = ? AND date(uploaded_at) = date('now')
-                """,
+            row = conn.execute(
+                "SELECT COUNT(*) FROM processed_videos WHERE channel_used = ? AND date(uploaded_at) = date('now')",
                 (channel,),
-            )
-            row = cur.fetchone()
-            return row[0] if row else 0
+            ).fetchone()
+            local_count = row[0] if row else 0
     except Exception as e:
         log.error(f"SQLite count error: {e}")
-        return 0
+
+    return max(sb_count, local_count)
 
 
 def get_last_upload_time(channel: int) -> float:
-    """Return the timestamp of the last upload for a specific channel, or 0 if none."""
-    sb = _get_supabase_client()
+    """Unix timestamp of the last upload for a channel, or 0."""
+    latest = 0.0
+    sb = _sb()
     if sb:
         try:
             result = (
@@ -222,30 +203,20 @@ def get_last_upload_time(channel: int) -> float:
                 .limit(1)
                 .execute()
             )
-            if result.data and len(result.data) > 0:
-                uploaded_at_str = result.data[0].get("uploaded_at")
-                if uploaded_at_str:
-                    dt = datetime.fromisoformat(uploaded_at_str.replace("Z", "+00:00"))
-                    return dt.timestamp()
-        except Exception:
-            pass
+            if result.data and result.data[0].get("uploaded_at"):
+                latest = max(latest, _parse_ts(result.data[0]["uploaded_at"]))
+        except Exception as e:
+            supabase_client.mark_failed(e)
 
     try:
         with sqlite3.connect(SQLITE_PATH) as conn:
-            cur = conn.cursor()
-            cur.execute(
-                """
-                SELECT uploaded_at FROM processed_videos
-                WHERE channel_used = ?
-                ORDER BY uploaded_at DESC LIMIT 1
-                """,
+            row = conn.execute(
+                "SELECT uploaded_at FROM processed_videos WHERE channel_used = ? ORDER BY uploaded_at DESC LIMIT 1",
                 (channel,),
-            )
-            row = cur.fetchone()
+            ).fetchone()
             if row and row[0]:
-                dt = datetime.fromisoformat(row[0].replace("Z", "+00:00"))
-                return dt.timestamp()
+                latest = max(latest, _parse_ts(row[0]))
     except Exception as e:
         log.error(f"SQLite last upload time error: {e}")
 
-    return 0.0
+    return latest

@@ -30,14 +30,21 @@ DEFAULT_WINDOWS = [
 
 
 def load_schedules() -> dict:
-    """Load peak schedules config file."""
-    if os.path.exists(SCHEDULE_FILE):
-        try:
-            with open(SCHEDULE_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception as e:
-            log.warning(f"Could not load {SCHEDULE_FILE}: {e}")
+    """Load peak schedules config (Supabase app_state → local peak_schedules.json)."""
+    try:
+        import state_store
+        data = state_store.get("peak_schedules", None)
+        if isinstance(data, dict):
+            return data
+    except Exception as e:
+        log.warning(f"Could not load peak schedules: {e}")
     return {"channels": {}}
+
+
+def save_schedules(data: dict) -> bool:
+    """Persist peak schedules config."""
+    import state_store
+    return state_store.set("peak_schedules", data)
 
 
 def get_channel_schedule(channel: int) -> dict:
@@ -227,7 +234,7 @@ def get_upcoming_publish_slots(
     for s in chosen:
         dt_utc = s["datetime"].astimezone(timezone.utc)
         iso_utc = dt_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
-        local_str = s["datetime"].strftime("%Y-%m-%d %H:%M") + " PKT"
+        local_str = s["datetime"].strftime("%Y-%m-%d %H:%M %Z")
         results.append({
             "publish_at_utc_iso": iso_utc,
             "publish_at_local": local_str,

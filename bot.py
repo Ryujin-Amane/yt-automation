@@ -32,6 +32,7 @@ import youtube_uploader
 import database
 import ai_agent
 import proxy_manager
+import state_store
 
 # ── Logging Setup ──────────────────────────────────────────
 logging.basicConfig(
@@ -163,8 +164,12 @@ def api_keep_alive_status():
 
 @app.route("/api/proxy/status")
 def api_proxy_status():
-    """Return current status of all proxy/VPN/anti-block layers."""
-    return jsonify(proxy_manager.get_status_summary())
+    """Return current status of all proxy/VPN/anti-block layers and providers."""
+    return jsonify({
+        **proxy_manager.get_status_summary(),
+        "providers": tiktok_scraper.get_provider_status(),
+        "storage": state_store.status(),
+    })
 
 
 @app.route("/api/proxy/test", methods=["POST", "GET"])
@@ -176,8 +181,14 @@ def api_proxy_test():
         tiktok_names = config._get_tiktok_usernames()
         test_username = tiktok_names[0] if tiktok_names else "tiktok"
 
-    report = proxy_manager.test_all_systems(test_username=test_username)
-    return jsonify(report)
+    net = proxy_manager.test_network_layers()
+    providers = tiktok_scraper.test_providers(test_username)
+    return jsonify({
+        "test_username": test_username,
+        "network_layers": net,
+        "providers": providers,
+        "overall_ok": any(v.get("ok") for v in providers.values() if isinstance(v, dict)),
+    })
 
 
 # ══════════════════════════════════════════════════════════
@@ -360,10 +371,8 @@ def api_schedule_save():
         return jsonify({"error": "No data provided"}), 400
 
     try:
-        import json as _json
-        with open(scheduler_planner.SCHEDULE_FILE, "w", encoding="utf-8") as f:
-            _json.dump(data, f, indent=2)
-        log.info("📅 Peak schedules updated via dashboard")
+        scheduler_planner.save_schedules(data)
+        log.info("📅 Peak schedules updated via dashboard (persisted to Supabase + local)")
         return jsonify({"success": True})
     except Exception as e:
         log.error(f"Failed to save schedules: {e}")
@@ -571,12 +580,9 @@ def _upload_pending_queue():
             if c_status.get(ch_str, "pending") != "pending":
                 continue
                 
-            if not targets:
-                # Bind this video exclusively to this channel to prevent duplicate uploads
-                targets = [channel]
-                video["target_channels"] = targets
-                queue_manager.update_video(video["queue_id"], {"target_channels": targets})
-                
+            if not queue_manager.claim_for_channel(video["queue_id"], channel):
+                continue
+
             log.info(f"⚡ Processing video {video['tiktok_id']} for CH{channel}")
             _do_upload(video, channel)
             uploads_left -= 1
@@ -713,6 +719,13 @@ def start_scheduler():
     with _scheduler_lock:
         if _scheduler is not None:
             return
+
+        # Recover any uploads interrupted by a Render restart and prune old items
+        try:
+            queue_manager.recover_stuck_uploads()
+            queue_manager.prune_old()
+        except Exception as e:
+            log.warning(f"Queue startup maintenance warning: {e}")
 
         interval = config.get_check_interval_minutes()
         _scheduler = BackgroundScheduler()
@@ -876,11 +889,15 @@ def _self_ping_loop():
 
 
 def _scheduler_heartbeat():
-    """Layer 3: APScheduler-based heartbeat that pings public & local URLs and heals self-ping thread."""
-    # Ensure self-ping thread is still alive
+    """Layer 3: APScheduler-based heartbeat that pings public & local URLs, heals self-ping thread, and syncs Supabase state."""
     if _self_ping_thread is None or not _self_ping_thread.is_alive():
         log.warning("💓 Self-ping thread was not running — restarting it via scheduler heartbeat!")
         start_self_ping()
+
+    try:
+        state_store.sync_pending()
+    except Exception:
+        pass
 
     public_url, localhost_url = _get_ping_urls()
     target = public_url if public_url != localhost_url else localhost_url
